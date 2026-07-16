@@ -1,0 +1,508 @@
+---
+title: "Cruise eDNA Sampling Data Exploration And Cleaning"
+author: "Ella Crotty"
+header-includes: \usepackage{fvextra} \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    toc: yes
+    df_print: paged
+urlcolor: blue
+---
+
+# Setup
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r Package Imports, message = F, warnings = F}
+# Warnings and startup messages suppressed
+library(tidyverse)
+library(patchwork)
+library(scales)
+library(ggrepel)
+library(OSMscale)
+library(here)
+library(stringr)
+library(maps)
+library(ggmap)
+library(plotly) # allows for plot inspection
+library(geosphere) # for calculating distance between points
+```
+
+
+```{r}
+# Import
+df_1 <- read_csv(here("SH2607_sampling_log_v1.csv"), na = "NA")
+head(df_1)
+```
+
+# Quick cleanup of longitude
+```{r}
+df_1 <- df_1 %>% 
+  mutate(`LONG START` = case_when(`LONG START` > 0 ~ `LONG START`*(-1),
+                                  .default = `LONG START`),
+         `LONG END` = case_when(`LONG END` > 0 ~ `LONG END`*(-1), 
+                                .default = `LONG END`),)
+```
+
+# Add summary columns
+
+Add T/F columns for commonly sighted species in notes Ex. Use grep to find "humpback" and mutate column Megaptera novaeangliae = T. Eldridge suggests first converting all letters in notes column to lowercase and removing special characters [stackoverflow example](https://stackoverflow.com/questions/57874680/how-do-i-remove-capital-letters-and-punctuation-from-data-column-in-r) [stackoverflow 2](https://stackoverflow.com/questions/10294284/remove-all-special-characters-from-a-string-in-r) [substringing](https://www.r-bloggers.com/2024/09/how-to-use-grep-and-return-only-substring-in-r-a-comprehensive-guide/) [replacing "" with na](https://stackoverflow.com/questions/28135987/replace-empty-entries-with-na-within-a-vector)
+
+## Marine mammal detections
+
+This code isn't rendered in the HTML output
+
+```{r, include = F}
+df_tf <- df_1 %>% 
+  mutate(temp = str_replace_all(tolower(Biological_notes), "[^[:alnum:]]", "")) %>%  # everything not alphanumeric go byebye
+  relocate(temp, .after = Biological_notes)
+
+mmg <- read_csv(here("marinemammalguide.csv"))
+
+# test1
+matches <- regexpr(paste(mmg$`Delphinus delphis`,collapse="|"), df_tf$temp[10])
+result <- substr(df_tf$temp[10], matches, matches + attr(matches, "match.length") - 1)
+#print(result)
+
+for (i in 1:length(colnames(mmg))) {
+  #print(i)
+  #print(colnames(mmg)[i])
+  name <- colnames(mmg)[i]
+  # print(paste(mmg[i],collapse="|"))
+  
+  spnames <- paste(mmg[[i]],collapse="|")
+  #print(spnames)
+
+  matches <- regexpr(spnames, df_tf$temp)
+  #print(matches)
+  result <- substr(df_tf$temp, matches, matches + attr(matches, "match.length") - 1)
+  # print(result)
+  
+  # change "" and NA to F, and any string to T
+  is.na(result) <- result == ""
+  result <- replace_na(result, "FALSE")
+  result <- result != F # if not false is true. lol
+  
+  
+  df_tf <- df_tf %>% 
+    mutate("TF_{name}" := result) %>% 
+    relocate(colnames(df_tf)[ncol(df_tf)], .after = temp)
+}
+```
+
+## Sample stats
+
+Calculations of summary statistics won't render in the HTML file.
+
+```{r, include = F}
+df_summary1 <- df_tf %>% 
+  select(-temp) %>% 
+  mutate(tend = case_when(
+    is.na(DATE_END) ~ paste(as.character(`DATE (YYYYMMDD)`), `TIME END`),
+    .default = paste(as.character(DATE_END), `TIME END`)), 
+         tstart = paste(as.character(`DATE (YYYYMMDD)`), `TIME START`))
+df_summary1b <- df_summary1 %>% 
+ mutate(DATE_TIME_END = as.POSIXct(tend, format = "%Y%m%d %H:%M:%S"),
+        DATE_TIME_START = as.POSIXct(tstart, format = "%Y%m%d %H:%M"))
+# why does time start not have seconds this cruise? who freakin knows. behold my glorious hotfix.
+df_summary1c <- df_summary1b %>% 
+  mutate(Minutes_Elapsed_Filter = difftime(DATE_TIME_END, DATE_TIME_START, units = "mins")) %>% # Add time elapsed
+  mutate(Minutes_Elapsed_Filter = as.numeric(Minutes_Elapsed_Filter))
+  
+df_summary2 <- df_summary1c %>% 
+  select(-tend, -tstart) %>% 
+  relocate(Minutes_Elapsed_Filter, .after = `VOLUME FILTERED (L)`) %>%
+  mutate(temp = str_split(`STATION START`, "_")) %>% 
+  mutate(STATION_SEP = sapply(temp, "[", 2 )) %>% # onshore/offshore temp
+  mutate(STATION_SEP = as.numeric(STATION_SEP)) %>% 
+  mutate(ONSHORE_OFFSHORE = case_when(STATION_SEP >= 60 ~ "OFFSHORE", .default = "ONSHORE")) %>%
+  relocate(ONSHORE_OFFSHORE, .after = `LINE START`) %>% 
+  relocate(`TF_Grampus griseus`, .after = `TF_Delphinus delphis`) 
+
+df_summary2 <- df_summary2 %>% 
+  select(-temp) %>% 
+  mutate(Flow_Rate_L_min = round(`VOLUME FILTERED (L)`/Minutes_Elapsed_Filter, 2)) %>% 
+  relocate(Flow_Rate_L_min, .after = Minutes_Elapsed_Filter)
+
+df_summary3 <- df_summary2 %>% 
+  mutate(Distance_covered_m =
+           distGeo(p1 = cbind(`LONG START`, `LAT START`), 
+                   p2 = cbind(`LONG END`, `LAT END`))) %>%
+  relocate(Distance_covered_m, .after = `LONG END`) %>% 
+  mutate(Site = paste(`STATION START`, `STATION END`, sep = "-"))
+
+filterspersite <- df_summary3 %>% 
+  group_by(Site) %>% 
+  summarize(NumFilters = n())
+
+df_summary <- full_join(df_summary3, filterspersite)
+```
+
+
+```{r}
+write_csv(df_summary, here("SR202511_eDNASampleMetadata_Clean.csv"))
+```
+
+# Sense Check Plots 
+```{r}
+# Make simple sample type - hopefully no longer needed
+df_plot <- df_summary
+
+### Date fix
+# datetimes my detested
+df_plot <- df_plot %>% 
+  mutate(Date = as.Date(as.character(`DATE (YYYYMMDD)`), format = "%Y%m%d"))
+```
+
+## Maps
+
+## Tips & common problems found in this map: 
+- Ella highly recommends clicking the two label flag button (sorta <= shaped) button in the HTML plotly viewer, which is the "compare data on hover" button. This pulls up the data for CTD and on station samples which are very hard to see otherwise.
+- The ggplotly() command makes a plot that you can hover your cursor over to see coordinates, which can help narrow down which samples are in the wrong place, or if transect start and end locations seem weird.
+- Point in a place far from the CalCOFI grid
+  - Typo: Check the written log and the coordinates of the samples immediately before and after to see if you wrote it down wrong or misread your handwriting when inputting data into the spreadsheet.
+  - Google Sheets autofill: Check the coordinates immediately above: Did you intend to copy them and accidentally dragged them down (e.g. copying 33 00'00.00" instead of 32 00'00.00")
+- Transect missing
+  - Typo in the sheet: Coordinate format was not correct, so it got deleted in the above degree to decimal conversion. It is usually a missing period or quotation mark. 
+  - To identify the missing transect use plotly zoom and "compare data on hover" buttons. Hover over the closest lines and dots to the missing transect, wiggle your cursor around, and eventually you should be able to see an NA value where there should be a coordinate. Write down the coordinate next to the NA value (if end longitude is NA, write down end latitude), search them in df_plot, and find the filter number of your problem! Then return to the spreadsheet, find that filter number, and check its coordinates carefully.
+
+```{r}
+# You'll have to press 1 to convfirm making the Maps directory if you  haven't already
+map_df <- map_data("world")
+first <- ggplot() +
+  geom_polygon(data=map_df, aes(x=long, y=lat, group=group),
+               fill = "tan", color = "black") +
+  theme_bw() +
+  coord_fixed(xlim=c(-124.5, -116.5),ylim=c(30,35), ratio = 1.3) +
+  geom_segment(data=df_plot, aes(x=`LONG START`, y=`LAT START`, 
+                                  xend=`LONG END`, yend=`LAT END`,
+                                  color = `SAMPLE TYPE`), 
+               arrow = arrow(angle = 10, length = unit(0.05, "inches")),
+               type = "closed", size = 1) +
+  geom_point(data=df_plot, aes(x=`LONG START`, y=`LAT START`), color="black",size=0.5)
+
+first
+
+ggsave(here("Maps", "TransectPlot.png"), width = 3000, height = 2000, units = "px")
+```
+# PDF ENABLE
+
+```{r, eval = F}
+# eval = F to knit to PDF
+ggplotly(first)
+```
+
+## Distances and Sites
+
+Use these maps to check for coordinate typos and make sure that the distance and site columns are working normally. 
+
+```{r}
+ggplot() +
+  geom_polygon(data=map_df, aes(x=long, y=lat, group=group),
+               fill = "tan", color = "black") +
+  theme_bw() +
+  coord_fixed(xlim=c(-124.5, -116.5),ylim=c(30,35), ratio = 1.3) +
+  geom_segment(data=df_plot, aes(x=`LONG START`, y=`LAT START`, 
+                                  xend=`LONG END`, yend=`LAT END`,
+                                  color = `SAMPLE TYPE`), 
+               arrow = arrow(angle = 10, length = unit(0.05, "inches")),
+               type = "closed", size = 1) +
+  geom_point(data=df_plot, aes(x=`LONG START`, y=`LAT START`), color="black",size=0.5) +
+  ggtitle("Transects Colored by Sample Type")
+
+ggsave(here("Maps", "TransectPlotFullSampleType.png"), width = 3000, height = 2000, units = "px")
+
+ggplot() +
+  geom_polygon(data=map_df, aes(x=long, y=lat, group=group),
+               fill = "tan", color = "black") +
+  theme_bw() +
+  coord_fixed(xlim=c(-124.5, -116.5),ylim=c(30,35), ratio = 1.3) +
+  geom_segment(data=df_plot, aes(x=`LONG START`, y=`LAT START`, 
+                                  xend=`LONG END`, yend=`LAT END`,
+                                  color = Distance_covered_m), 
+               arrow = arrow(angle = 10, length = unit(0.05, "inches")),
+               type = "closed", size = 1) +
+  geom_point(data=df_plot, aes(x=`LONG START`, y=`LAT START`), color="black",size=0.5) +
+  ggtitle("Transects colored by distance in meters")
+
+ggsave(here("Maps", "TransectPlotDistances.png"), width = 3000, height = 2000, units = "px")
+
+ggplot() +
+  geom_polygon(data=map_df, aes(x=long, y=lat, group=group),
+               fill = "tan", color = "black") +
+  theme_bw() +
+  theme(legend.position="none") +
+  coord_fixed(xlim=c(-124.5, -116.5),ylim=c(30,35), ratio = 1.3) +
+  geom_segment(data=df_plot, aes(x=`LONG START`, y=`LAT START`, 
+                                  xend=`LONG END`, yend=`LAT END`,
+                                  color = Site), 
+               arrow = arrow(angle = 10, length = unit(0.05, "inches")),
+               type = "closed", size = 1) +
+  geom_point(data=df_plot, aes(x=`LONG START`, y=`LAT START`), color="black",size=0.5) +
+  ggtitle("Transects colored by Site (start and end combo)")
+
+ggsave(here("Maps", "TransectPlotSites.png"), width = 3000, height = 2000, units = "px")
+
+ggplot() +
+  geom_polygon(data=map_df, aes(x=long, y=lat, group=group),
+               fill = "tan", color = "black") +
+  theme_bw() +
+  coord_fixed(xlim=c(-124.5, -116.5),ylim=c(30,35), ratio = 1.3) +
+  geom_segment(data=df_plot, aes(x=`LONG START`, y=`LAT START`, 
+                                  xend=`LONG END`, yend=`LAT END`,
+                                  color = `SAMPLE TYPE`), 
+               arrow = arrow(angle = 10, length = unit(0.05, "inches")),
+               type = "closed", size = 1) +
+  ggtitle("Transects Colored by Sample Type")
+
+ggsave(here("Maps", "TransectPlotNoDots.png"), width = 3000, height = 2000, units = "px")
+
+ggplot() +
+  geom_polygon(data=map_df, aes(x=long, y=lat, group=group),
+               fill = "tan", color = "black") +
+  theme_bw() +
+  coord_fixed(xlim=c(-124.5, -116.5),ylim=c(30,35), ratio = 1.3) +
+  geom_point(data = df_plot, aes(x = `LONG START`, y = `LAT START`)) +
+  geom_point(data = df_plot, aes(x = `LONG END`, y = `LAT END`)) +
+  ggtitle("All Transect Start And Endpoints")
+
+ggsave(here("Maps", "DotMap.png"), width = 3000, height = 2000, units = "px")
+
+ggplot() +
+  geom_polygon(data=map_df, aes(x=long, y=lat, group=group),
+               fill = "tan", color = "yellow") + # so that any misplaced black dots will show up really clearly
+  theme_bw() +
+  #coord_fixed(xlim=c(-124.5, -116.5),ylim=c(30,35), ratio = 1.3) +
+  geom_point(data = df_plot, aes(x = `LONG START`, y = `LAT START`)) +
+  geom_point(data = df_plot, aes(x = `LONG END`, y = `LAT END`)) +
+  ggtitle("Check for coordinate typos")
+
+ggsave(here("Maps", "ZoomedOutMap.png"), width = 3000, height = 2000, units = "px")
+```
+
+
+## Bar plots
+- BIO_REP should mostly be 1 with a few 2 & 3
+- Date, station, and line should be fairly flat distributions
+- Sample type and storage box should make sense to you based on what you did - are there any NA values? Are there more partial transects than full transects? (there probably should be) etc. 
+- Volume histograms should show any big outliers. CTD samples are probably more clustered. There shouldn't be any 0 or NA volumes but it can be hard to see on histograms. 
+
+### Dates and Stations
+
+The really high count dates or stations have negatives or replicates on station.
+
+Check anything weird against your cruise plan.
+
+Generally, there should be more MOSAIC-B than anything else, an any CTD or MOSAIC-A >1 should be checked to make sure you intended that replciate.
+
+```{r}
+ggplot(data = df_plot, aes(x = Date)) +
+  geom_bar(color = "black", fill = "orchid2") +
+  theme_bw()
+ggsave(filename = here("HistogramsBars", "Dates.png"), width = 2000, height = 2000, units = "px")
+# Should be somewhat evenly spread
+
+ggplot(data = df_plot, aes(x = as.character(`LINE START`))) +
+  geom_bar(color = "black", fill = "orchid2") +
+  theme_bw()
+ggsave(filename = here("HistogramsBars", "Lines.png"), width = 2000, height = 2000, units = "px")
+
+ggplot(data = df_plot %>% filter(!is.na(`STATION START`)),
+                         aes(x = as.character(`STATION START`))) +
+  geom_bar(color = "black", fill = "orchid2", na.rm = T) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.4, size = 10))
+ggsave(filename = here("HistogramsBars", "StationStart.png"), width = 2000, height = 2000, units = "px")
+
+ggplot(data = df_plot %>% filter(!is.na(`STATION END`)), 
+       aes(x = as.character(`STATION END`))) +
+  geom_bar(color = "black", fill = "orchid2", na.rm = T) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.4, size = 10))
+ggsave(filename = here("HistogramsBars", "StationEnd.png"), width = 2000, height = 2000, units = "px")
+
+ggplot(data = df_plot %>% filter(!is.na(`STATION END`)), 
+       aes(x = as.character(Site))) +
+  geom_bar(color = "black", fill = "orchid2", na.rm = T) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.4, size = 10))
+ggsave(filename = here("HistogramsBars", "Sites.png"), width = 2000, height = 2000, units = "px")
+
+ggplot(data = df_plot %>% filter(!is.na(`STATION END`)),
+       aes(x = as.character(Site), fill = `SAMPLE TYPE`)) +
+  geom_bar(color = "black", na.rm = T) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.4, size = 5)) +
+  facet_wrap(facets = "`LINE START`", scales = "free_x", ncol = 3)
+ggsave(filename = here("HistogramsBars", "StationEndSampleType.png"), width = 2000, height = 2000, units = "px")
+
+SiteFacetExport <- ggplot(data = df_plot %>% filter(!is.na(`STATION END`)),
+       aes(x = as.character(Site), fill = `SAMPLE TYPE`)) +
+  geom_bar(color = "black", na.rm = T) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.4, size = 15)) +
+  facet_wrap(facets = "`LINE START`", scales = "free_x", ncol = 2)
+ggsave(filename = here("HistogramsBars", "Site_Sample_Breakdown.png"), plot = SiteFacetExport, width = 3000, height = 6000, units = "px")
+```
+### Volume Filtered
+
+CTD samples should be clustered around one volume. Check for major outliers, and see if it matches your log.
+
+```{r}
+ggplot(data = df_plot, aes(x = `VOLUME FILTERED (L)`)) +
+  geom_histogram(fill = "orchid2", binwidth = 5, color = "black") +
+  theme_bw() 
+ggplot(data = df_plot, aes(x = `VOLUME FILTERED (L)`)) +
+  geom_histogram(aes(fill = `SAMPLE TYPE`), binwidth = 5, color = "black") +
+  theme_bw()
+ggsave(filename = here("HistogramsBars", "VolumeTypeBig.png"), width = 3000, height = 6000, units = "px")
+ggplot(data = df_plot, aes(x = `VOLUME FILTERED (L)`)) +
+  geom_histogram(aes(fill = `SAMPLE TYPE`), binwidth = 1, color = "black") +
+  theme_bw()
+ggsave(filename = here("HistogramsBars", "VolumeTypeSmall.png"), width = 3000, height = 6000, units = "px")
+```
+### Sample Types 
+
+This should help catch whether you've gotten all the NAs or typos in these columns
+
+```{r}
+ggplot(data = df_plot, aes(x = `SAMPLE TYPE`)) + 
+  geom_bar(color = "black", fill = "orchid2") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.9, hjust = 1, 
+                                   size = 10))
+ggsave(filename = here("HistogramsBars", "SampleType.png"), width = 3000, height = 6000, units = "px")
+ggplot(data = df_plot, aes(x = `SAMPLE DESCRIPTION`)) +
+  geom_bar(color = "black", fill = "orchid2") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.9, hjust = 1, 
+                                   size = 10))
+ggsave(filename = here("HistogramsBars", "SampleDescription.png"), width = 3000, height = 6000, units = "px")
+
+ggplot(data = df_plot, aes(x = `Storage box`)) +
+  geom_bar(color = "black", fill = "orchid2") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.9, hjust = 1, 
+                                   size = 10))
+ggsave(filename = here("HistogramsBars", "Storage.png"), width = 3000, height = 6000, units = "px")
+```
+
+## Time plots
+
+- If this plot won't render, make sure TIME.START is all times and has no characters.
+- The number labels will allow you to spot-check for typos. 
+- Time start vs. time end should be a pretty straight line, investigate any points that are off the line based on their labels. There may be a cluster in the lower right, which is usually correctly labeled samples that started late at night and ended after midnight (e.g. technically the next morning).
+
+```{r}
+
+ggplot(data = df_plot, aes(x = `TIME START`, y = `TIME END`)) +
+  geom_point(color = "orchid3") +
+  geom_text(aes(label = `Filter #`, vjust = -1)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 2, size = 4))
+ggsave(filename = here("Time", "TimeDiagonal.png"), width = 2000, height = 2000, units = "px")
+
+# TIME.START had one "CTD" value and wasn't parsing as hms, fixed in spreadsheet
+# Unusual lengths: F025,F053,F086,F087,F109,F110(started 23xx, ended 00xx)
+# F055,F135 (10 or 11 pm mislabeled as AM, fixed in spreadsheet )
+# F078 (that one day we had an actual 8 hour transect)
+```
+
+### Minutes elapsed
+
+If there are a bunch of negative times, make sure you've got DATE_END accurate. Try opening df_plot and sorting Minutes_Elapsed_Filter least to greatest, and the problems will reveal themselves. Then go back to the spreadsheet and fix it.
+
+Does this seem accurate to what you did?
+```{r}
+ggplot(data = df_plot, aes(x = `Minutes_Elapsed_Filter`)) +
+  geom_histogram(fill = "orchid2", color = "black", binwidth = 30) +
+  theme_bw()
+ggsave(filename = here("HistogramsBars", "TimeHistogram.png"), width = 2000, height = 2000, units = "px")
+```
+
+```{r}
+ggplot(df_plot, aes(x = `VOLUME FILTERED (L)`, y = Flow_Rate_L_min, color = `SAMPLE TYPE`)) +
+  geom_point() +
+  scale_color_manual(values = c("blue", "green", "purple",  "orange")) +
+  theme_bw()
+ggsave(filename = here("Time", "VolumeVsFlow.png"), width = 2000, height = 2000, units = "px")
+
+ggplot(df_plot, aes(x = `VOLUME FILTERED (L)`, y = Flow_Rate_L_min, color = `INSHORE.OFFSHORE`)) +
+  geom_point() +
+  scale_color_manual(values = c("orchid4", "orchid1")) +
+  theme_bw()
+ggsave(filename = here("Time", "VolumeVsFlow.png"), width = 2000, height = 2000, units = "px")
+```
+
+```{r}
+df_plot <- df_plot %>% 
+  mutate(DATEFAC = as.factor(`DATE (YYYYMMDD)`))
+
+ggplot(df_plot, aes(x = DATE_TIME_START, y = DATE_TIME_END, color = Site)) +
+  geom_point() +
+  theme_bw() +
+  theme(legend.position="none") +
+  ggtitle("Site Time Overlaps")
+
+ggplot(df_plot, aes(x = DATE_TIME_START, xend = DATE_TIME_END, color = Site, y = DATE_TIME_START, yend = DATE_TIME_START)) +
+  geom_segment() +
+  theme_bw() +
+  theme(legend.position="none") +
+  ggtitle("Site Time Overlaps")
+
+ggplot(df_plot, aes(x = DATE_TIME_START, xend = DATE_TIME_END, color = Site, y = DATE_TIME_START, yend = DATE_TIME_START)) +
+  geom_segment() +
+  theme_bw() +
+  theme(legend.position="none") +
+  ggtitle("Site Time Overlaps") +
+  facet_wrap(facets = "DATEFAC", scales = "free")
+
+SiteOverlapExport <- ggplot(df_plot, aes(x = DATE_TIME_START, xend = DATE_TIME_END, 
+                                         color = `SAMPLE TYPE`, 
+                                         y = DATE_TIME_START, yend = DATE_TIME_START)) +
+  geom_segment(linewidth = 1, lineend = "round") +
+  geom_point(aes(x = DATE_TIME_START, y = DATE_TIME_START), color = "black", size = 2) +
+  geom_point(aes(x = DATE_TIME_END, y = DATE_TIME_START), color = "black", size = 2) +
+  theme_bw() +
+  theme(legend.position="none") +
+  ggtitle("Site Time Overlaps") +
+  facet_wrap(facets = "DATEFAC", scales = "free", ncol = 2) +
+  theme(text = element_text(size = 20))
+
+ggsave(filename = here("Time", "Site_Sample_Breakdown.png"), plot = SiteOverlapExport, width = 4000, height = 6000, units = "px")
+```
+
+# Warning
+
+There is one final plot that doesn't render in HTML but can be run to export plots checking that samples from the same site overlap in time reasonably. Make a folder called OverlapChecks first.
+
+```{r, eval = F}
+# not run in HTML knitting
+df_plot <- df_plot %>% 
+  mutate(PlottingID = c(1:nrow(df_plot)))
+
+for (i in 1:length(unique(df_plot$Site))) {
+  st <- unique(df_plot$Site)[i]
+  print(ggplot(df_plot %>% filter(Site == st), aes(x = DATE_TIME_START, xend = DATE_TIME_END, 
+                                         color = `SAMPLE TYPE`, 
+                                         y = PlottingID, yend = PlottingID)) +
+          scale_color_manual(values = c("MOSAIC-A" = "#7CAE00", "CTD" = "#F8766D", "MOSAIC-B" = "#00BFC4", "MOSAIC-E" = "#C77CFF")) +
+    geom_segment(linewidth = 1, lineend = "round") +
+    geom_point(aes(x = DATE_TIME_START, y = PlottingID), 
+               color = "black", size = 2) +
+    geom_point(aes(x = DATE_TIME_END, y = PlottingID), 
+               color = "black", size = 2) +
+    theme_bw() +
+    ggtitle(paste(unique(st, "Site Time Overlaps"))) +
+    theme(text = element_text(size = 20))
+  )
+  
+  ggsave(filename = here("OverlapChecks", paste(st, "OverlapCheck.png", sep = "")), width = 2000, height = 2000, units = "px")
+}
+```
+
+
