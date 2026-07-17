@@ -35,7 +35,7 @@ library(geosphere) # for calculating distance between points
 
 ```{r}
 # Import
-df_1 <- read_csv(here("SH2607_sampling_log_v1.csv"), na = "NA")
+df_1 <- read_csv(here("SH2607_sampling_log_v7.csv"), na = "NA")
 head(df_1)
 ```
 
@@ -133,7 +133,7 @@ df_summary3 <- df_summary2 %>%
            distGeo(p1 = cbind(`LONG START`, `LAT START`), 
                    p2 = cbind(`LONG END`, `LAT END`))) %>%
   relocate(Distance_covered_m, .after = `LONG END`) %>% 
-  mutate(Site = paste(`STATION START`, `STATION END`, sep = "-"))
+  mutate(Site = paste(`LINE START`, `STATION START`, `LINE END`, `STATION END`, sep = "-"))
 
 filterspersite <- df_summary3 %>% 
   group_by(Site) %>% 
@@ -169,6 +169,12 @@ df_plot <- df_plot %>%
 - Transect missing
   - Typo in the sheet: Coordinate format was not correct, so it got deleted in the above degree to decimal conversion. It is usually a missing period or quotation mark. 
   - To identify the missing transect use plotly zoom and "compare data on hover" buttons. Hover over the closest lines and dots to the missing transect, wiggle your cursor around, and eventually you should be able to see an NA value where there should be a coordinate. Write down the coordinate next to the NA value (if end longitude is NA, write down end latitude), search them in df_plot, and find the filter number of your problem! Then return to the spreadsheet, find that filter number, and check its coordinates carefully.
+  
+  The end of F120 was wrong - Ella copied & pasted some other station's coordinates, fixed it by referencing the coordinate photos.
+  
+  The gaps in the south are because Ella was alone and sleeping. The one gap in the north is because the sea state got too rough to sample and we skipped 3 hours or so.
+  
+  F186 was missing the end, start 34.5881	-121.8272	and end at	22:25	34.6606	-121.6757, taken from a photo from Nastassia with the time cut off but the location fits the grid.
 
 ```{r}
 # You'll have to press 1 to convfirm making the Maps directory if you  haven't already
@@ -297,7 +303,9 @@ The really high count dates or stations have negatives or replicates on station.
 
 Check anything weird against your cruise plan.
 
-Generally, there should be more MOSAIC-B than anything else, an any CTD or MOSAIC-A >1 should be checked to make sure you intended that replciate.
+Generally, there should be more MOSAIC-B than anything else, an any CTD or MOSAIC-A >1 should be checked to make sure you intended that replicate.
+
+83.3-40.6 has two MOSAIC-E samples because we stopped on the wrong location first and I'd already started my sample when they realized.
 
 ```{r}
 ggplot(data = df_plot, aes(x = Date)) +
@@ -352,6 +360,8 @@ ggsave(filename = here("HistogramsBars", "Site_Sample_Breakdown.png"), plot = Si
 
 CTD samples should be clustered around one volume. Check for major outliers, and see if it matches your log.
 
+Goal: 20 L, especially for on station. NEG should be 3-4 L.
+
 ```{r}
 ggplot(data = df_plot, aes(x = `VOLUME FILTERED (L)`)) +
   geom_histogram(fill = "orchid2", binwidth = 5, color = "black") +
@@ -399,11 +409,12 @@ ggsave(filename = here("HistogramsBars", "Storage.png"), width = 3000, height = 
 
 ```{r}
 
-ggplot(data = df_plot, aes(x = `TIME START`, y = `TIME END`)) +
+times <- ggplot(data = df_plot, aes(x = `TIME START`, y = `TIME END`)) +
   geom_point(color = "orchid3") +
   geom_text(aes(label = `Filter #`, vjust = -1)) +
   theme_bw() +
   theme(axis.text.x = element_text(angle = 90, vjust = 2, size = 4))
+times
 ggsave(filename = here("Time", "TimeDiagonal.png"), width = 2000, height = 2000, units = "px")
 
 # TIME.START had one "CTD" value and wasn't parsing as hms, fixed in spreadsheet
@@ -412,14 +423,29 @@ ggsave(filename = here("Time", "TimeDiagonal.png"), width = 2000, height = 2000,
 # F078 (that one day we had an actual 8 hour transect)
 ```
 
+Crossing days: F087, F121, F001, F101, F085, F187, F135
+
+F087 actually had some weird spreadsheet formatting issue
+
+```{r, eval = F}
+ggplotly(times)
+```
+
 ### Minutes elapsed
 
 If there are a bunch of negative times, make sure you've got DATE_END accurate. Try opening df_plot and sorting Minutes_Elapsed_Filter least to greatest, and the problems will reveal themselves. Then go back to the spreadsheet and fix it.
 
 Does this seem accurate to what you did?
+
+Should be mostly 60, with a peak at 20 minutes for on station and nothing above ~120.
 ```{r}
 ggplot(data = df_plot, aes(x = `Minutes_Elapsed_Filter`)) +
   geom_histogram(fill = "orchid2", color = "black", binwidth = 30) +
+  theme_bw()
+ggsave(filename = here("HistogramsBars", "TimeHistogram.png"), width = 2000, height = 2000, units = "px")
+
+ggplot(data = df_plot, aes(x = `Minutes_Elapsed_Filter`)) +
+  geom_histogram(fill = "orchid2", color = "black", binwidth = 10) +
   theme_bw()
 ggsave(filename = here("HistogramsBars", "TimeHistogram.png"), width = 2000, height = 2000, units = "px")
 ```
@@ -476,9 +502,15 @@ SiteOverlapExport <- ggplot(df_plot, aes(x = DATE_TIME_START, xend = DATE_TIME_E
 ggsave(filename = here("Time", "Site_Sample_Breakdown.png"), plot = SiteOverlapExport, width = 4000, height = 6000, units = "px")
 ```
 
-# Warning
+# RUN THIS Warning
 
 There is one final plot that doesn't render in HTML but can be run to export plots checking that samples from the same site overlap in time reasonably. Make a folder called OverlapChecks first.
+
+83.3-90 to 60 is weird because we skipped 80 and 70 due to weather
+
+87.6-100 to 110 is weird, the final mosaic-b is tiny - typo! 22.35 instead of 22:35
+
+F129 is actually a negative control
 
 ```{r, eval = F}
 # not run in HTML knitting
@@ -490,7 +522,7 @@ for (i in 1:length(unique(df_plot$Site))) {
   print(ggplot(df_plot %>% filter(Site == st), aes(x = DATE_TIME_START, xend = DATE_TIME_END, 
                                          color = `SAMPLE TYPE`, 
                                          y = PlottingID, yend = PlottingID)) +
-          scale_color_manual(values = c("MOSAIC-A" = "#7CAE00", "CTD" = "#F8766D", "MOSAIC-B" = "#00BFC4", "MOSAIC-E" = "#C77CFF")) +
+          scale_color_manual(values = c("MOSAIC-A" = "#7CAE00", "CTD" = "#F8766D", "MOSAIC-B" = "#00BFC4", "MOSAIC-E" = "#C77CFF", "NEG" = "#F8766D")) + # No CTD this time
     geom_segment(linewidth = 1, lineend = "round") +
     geom_point(aes(x = DATE_TIME_START, y = PlottingID), 
                color = "black", size = 2) +
